@@ -1,18 +1,22 @@
-// esphome/components/carrier_uart_ir/carrier_uart_bridge.h
 #pragma once
 
-#include "esphome.h"
+#include <vector>
+#include <cmath>
+
+#include "esphome/core/component.h"
+#include "esphome/core/log.h"
+#include "esphome/components/uart/uart.h"
+#include "esphome/components/climate/climate.h"
 
 namespace esphome {
 namespace carrier_uart_ir {
-
-using namespace esphome;
 
 class CarrierUartBridge : public climate::Climate,
                           public Component,
                           public uart::UARTDevice {
  public:
-  CarrierUartBridge(uart::UARTComponent *parent) : UARTDevice(parent) {}
+  explicit CarrierUartBridge(uart::UARTComponent *parent)
+      : uart::UARTDevice(parent) {}
 
   void setup() override {
     ESP_LOGI("carrier_bridge", "Carrier UART bridge setup");
@@ -20,14 +24,13 @@ class CarrierUartBridge : public climate::Climate,
   }
 
   void loop() override {
-    while (available()) {
-      uint8_t b = read();
-      process_uart_byte_(b);
+    while (this->available()) {
+      uint8_t b = this->read();
+      this->process_uart_byte_(b);
     }
   }
 
-  // === Climate API ===
-
+  // Приход команд из HA
   void control(const climate::ClimateCall &call) override {
     if (call.get_mode().has_value())
       this->mode = *call.get_mode();
@@ -39,11 +42,14 @@ class CarrierUartBridge : public climate::Climate,
       this->fan_mode = *call.get_fan_mode();
 
     ESP_LOGI("carrier_bridge", "Control: mode=%d temp=%.1f fan=%d",
-             (int)this->mode, this->target_temperature.value_or(NAN),
-             (int)this->fan_mode.value_or(climate::CLIMATE_FAN_AUTO));
+             (int) this->mode,
+             this->target_temperature.has_value()
+                 ? this->target_temperature.value()
+                 : NAN,
+             (int) this->fan_mode.value_or(climate::CLIMATE_FAN_AUTO));
 
-    // TODO: тут потом повесим отправку »  (HeatpumpIR / CarrierHeatpumpIR)
-    send_ir_from_state_();
+    // Пока только логируем, позже сюда подвесим IR-отправку
+    this->send_ir_from_state_();
 
     this->publish_state();
   }
@@ -72,7 +78,7 @@ class CarrierUartBridge : public climate::Climate,
   }
 
  protected:
-  // ===== ѕарсер UART =====
+  // ======= UART парсер =======
 
   enum ParserState {
     STATE_WAIT_START,
@@ -102,6 +108,7 @@ class CarrierUartBridge : public climate::Climate,
           frame_pid_ = b;
           parser_state_ = STATE_GOT_PID;
         } else {
+          // потеряли синхронизацию — пробуем начать заново
           parser_state_ = STATE_WAIT_START;
           if (b == 0x55 || b == 0xAA) {
             frame_start_ = b;
@@ -124,11 +131,11 @@ class CarrierUartBridge : public climate::Climate,
           bytes_read_++;
           if (bytes_read_ == frame_len_) {
             // следующий байт будет checksum
-            parser_state_ = STATE_GOT_PID;  // будем использовать как "ждЄм checksum"
+            parser_state_ = STATE_GOT_START;  // временно используем как "ждём checksum"
           }
         } else {
-          // этот байт Ч checksum
-          handle_frame_with_checksum_(b);
+          // этот байт — checksum
+          this->handle_frame_with_checksum_(b);
           parser_state_ = STATE_WAIT_START;
         }
         break;
@@ -137,13 +144,14 @@ class CarrierUartBridge : public climate::Climate,
 
   bool check_checksum_(uint8_t recv_ck) {
     uint16_t sum = frame_start_ + frame_pid_ + frame_len_;
-    for (auto v : frame_payload_) sum += v;
-    uint8_t calc = (uint8_t)(- (sum & 0xFF));
+    for (auto v : frame_payload_)
+      sum += v;
+    uint8_t calc = (uint8_t) (-(sum & 0xFF));
     return calc == recv_ck;
   }
 
   void handle_frame_with_checksum_(uint8_t cks) {
-    if (!check_checksum_(cks)) {
+    if (!this->check_checksum_(cks)) {
       ESP_LOGW("carrier_bridge",
                "Bad checksum: start=%02X pid=%02X len=%u",
                frame_start_, frame_pid_, frame_len_);
@@ -151,18 +159,19 @@ class CarrierUartBridge : public climate::Climate,
     }
 
     if (frame_start_ == 0x55 && frame_pid_ == 0x90) {
-      handle_state_frame_();
+      this->handle_state_frame_();
     } else if (frame_start_ == 0x55 && frame_pid_ == 0x91) {
-      handle_mode_frame_();
+      this->handle_mode_frame_();
     } else {
-      // 0xAA 90 / 0xAA 91 Ч ответы диспле€, пока игнорируем
+      // AA 90 / AA 91 сейчас игнорируем
     }
   }
 
-  // ===== –азбор содержимого кадров =====
+  // ======= Разбор кадров =======
 
   void handle_state_frame_() {
-    if (frame_payload_.size() < 0x14) return;
+    if (frame_payload_.size() < 0x14)
+      return;
 
     const uint8_t *header = &frame_payload_[0];
     const uint8_t *mode_block = &frame_payload_[16];
@@ -172,8 +181,8 @@ class CarrierUartBridge : public climate::Climate,
              header[0], header[1], header[2], header[3],
              mode_block[0], mode_block[1], mode_block[2], mode_block[3]);
 
-    if (!is_all_zero_(mode_block, 8)) {
-      decode_mode_block_(mode_block);
+    if (!this->is_all_zero_(mode_block, 8)) {
+      this->decode_mode_block_(mode_block);
     } else {
       this->mode = climate::CLIMATE_MODE_OFF;
     }
@@ -182,7 +191,9 @@ class CarrierUartBridge : public climate::Climate,
   }
 
   void handle_mode_frame_() {
-    if (frame_payload_.size() != 8) return;
+    if (frame_payload_.size() != 8)
+      return;
+
     const uint8_t *mode_block = &frame_payload_[0];
 
     ESP_LOGV("carrier_bridge",
@@ -190,10 +201,10 @@ class CarrierUartBridge : public climate::Climate,
              mode_block[0], mode_block[1], mode_block[2], mode_block[3],
              mode_block[4], mode_block[5], mode_block[6], mode_block[7]);
 
-    if (!is_all_zero_(mode_block, 8)) {
-      decode_mode_block_(mode_block);
+    if (!this->is_all_zero_(mode_block, 8)) {
+      this->decode_mode_block_(mode_block);
     } else {
-      // 00..00 Ч OFF / LED toggle; пока трактуем как OFF
+      // 00..00 — OFF или LED-toggle; пока трактуем как OFF
       this->mode = climate::CLIMATE_MODE_OFF;
     }
 
@@ -202,28 +213,31 @@ class CarrierUartBridge : public climate::Climate,
 
   bool is_all_zero_(const uint8_t *p, size_t n) {
     for (size_t i = 0; i < n; i++)
-      if (p[i] != 0x00) return false;
+      if (p[i] != 0x00)
+        return false;
     return true;
   }
 
-  // ===== ƒекодирование режима/температуры из 8 байт 55 91 =====
+  // ======= Декодирование режима/температуры из 55 91 =======
 
   void decode_mode_block_(const uint8_t *m) {
     uint8_t b0 = m[0];
     uint8_t b1 = m[1];
     uint8_t b4 = m[4];
 
-    float temp = decode_temperature_(b0, b1);
+    float temp = this->decode_temperature_(b0, b1);
     if (!std::isnan(temp))
       this->target_temperature = temp;
 
-    climate::ClimateMode new_mode = decode_mode_(b0, b1, b4);
+    climate::ClimateMode new_mode = this->decode_mode_(b0, b1, b4);
     this->mode = new_mode;
-    this->fan_mode = climate::CLIMATE_FAN_AUTO;  // TODO: вытащить реальные биты
+    this->fan_mode = climate::CLIMATE_FAN_AUTO;  // TODO: вынести фан из заголовка 55 90
   }
 
   float decode_temperature_(uint8_t b0, uint8_t b1) {
-    struct Entry { uint8_t a, b; uint8_t t; };
+    struct Entry {
+      uint8_t a, b, t;
+    };
     static const Entry table[] = {
         {0x06, 0x7F, 18},
         {0x06, 0x6F, 19},
@@ -240,19 +254,20 @@ class CarrierUartBridge : public climate::Climate,
         {0x4F, 0x3F, 30},
     };
     for (auto &e : table) {
-      if (e.a == b0 && e.b == b1) return (float)e.t;
+      if (e.a == b0 && e.b == b1)
+        return (float) e.t;
     }
     return NAN;
   }
 
   climate::ClimateMode decode_mode_(uint8_t b0, uint8_t b1, uint8_t b4) {
-    // груба€ логика из наших логов:
-    // 5B 4F .. b4=0x40 => COOL
-    // 5B 4F .. b4=0x80 => HEAT
-    // 5B 4F .. b4=0x09/0x89 => AUTO
-    // 06 6F .. b4=0x48 => DRY
-    // 06 6F .. b4=0x00 => FAN
-    // 3F xx ..         => TURBO toggle
+    // из логов:
+    // 5B 4F .. b4=0x40         => COOL
+    // 5B 4F .. b4=0x80         => HEAT
+    // 5B 4F .. b4=0x09/0x89    => AUTO
+    // 06 6F .. b4=0x48         => DRY
+    // 06 6F .. b4=0x00         => FAN
+    // 3F xx ..                 => TURBO toggle (режим не меняем)
 
     if (b0 == 0x5B && b1 == 0x4F) {
       if (b4 & 0x80) {
@@ -273,19 +288,22 @@ class CarrierUartBridge : public climate::Climate,
     }
 
     if (b0 == 0x3F) {
-      // TURBO toggle Ч режим не мен€ем
+      // TURBO toggle — оставляем прошлый режим
       return this->mode;
     }
 
     return this->mode;
   }
 
-  // ===== «аглушка отправки IR =====
+  // ======= Заглушка отправки IR =======
 
   void send_ir_from_state_() {
-    // TODO: тут потом подключаем heatpumpir или пр€мой CarrierHeatpumpIR.
-    ESP_LOGI("carrier_bridge", "send_ir_from_state_ (stub): mode=%d temp=%.1f",
-             (int)this->mode, this->target_temperature.value_or(NAN));
+    ESP_LOGI("carrier_bridge",
+             "send_ir_from_state_ (stub): mode=%d temp=%.1f",
+             (int) this->mode,
+             this->target_temperature.has_value()
+                 ? this->target_temperature.value()
+                 : NAN);
   }
 };
 
