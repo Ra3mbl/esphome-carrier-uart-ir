@@ -42,7 +42,7 @@ class CarrierUartBridge : public climate::Climate,
     if (now - this->last_log_ms_ > 10000) {
       this->last_log_ms_ = now;
       ESP_LOGI("carrier_bridge",
-               "UART stats: bytes=%u frames=%u (55 90=%u, 55 91=%u)",
+               "UART stats: bytes=%u frames_ok=%u (55 90=%u, 55 91=%u)",
                this->uart_byte_count_,
                this->uart_frame_count_,
                this->frame_55_90_count_,
@@ -51,7 +51,7 @@ class CarrierUartBridge : public climate::Climate,
   }
 
   // ================================================================
-  //   Climate control Ч домашн€€ автоматика посылает команды ESP
+  // Climate control Ч команды из HA
   // ================================================================
   void control(const climate::ClimateCall &call) override {
     if (call.get_mode().has_value())
@@ -109,7 +109,9 @@ class CarrierUartBridge : public climate::Climate,
     STATE_WAIT_START,
     STATE_GOT_START,
     STATE_GOT_PID,
-    STATE_READING_PAYLOAD
+    STATE_GOT_LEN,
+    STATE_READING_PAYLOAD,
+    STATE_WAIT_CHECKSUM
   };
 
   ParserState parser_state_{STATE_WAIT_START};
@@ -139,10 +141,12 @@ class CarrierUartBridge : public climate::Climate,
         break;
 
       case STATE_GOT_START:
+        // ждЄм PID
         if (b == 0x90 || b == 0x91) {
           frame_pid_ = b;
           parser_state_ = STATE_GOT_PID;
         } else {
+          // не PID Ч сброс, но этот байт может быть новым стартом
           parser_state_ = STATE_WAIT_START;
           if (b == 0x55 || b == 0xAA) {
             frame_start_ = b;
@@ -152,46 +156,58 @@ class CarrierUartBridge : public climate::Climate,
         break;
 
       case STATE_GOT_PID:
+        // длина
         frame_len_ = b;
         frame_payload_.clear();
         frame_payload_.reserve(frame_len_);
         bytes_read_ = 0;
-        parser_state_ = STATE_READING_PAYLOAD;
+        if (frame_len_ == 0) {
+          parser_state_ = STATE_WAIT_CHECKSUM;
+        } else {
+          parser_state_ = STATE_READING_PAYLOAD;
+        }
         break;
 
       case STATE_READING_PAYLOAD:
-        if (bytes_read_ < frame_len_) {
-          frame_payload_.push_back(b);
-          bytes_read_++;
-          if (bytes_read_ == frame_len_) {
-            parser_state_ = STATE_GOT_START;  // next byte = checksum
-          }
-        } else {
-          this->handle_frame_with_checksum_(b);
-          parser_state_ = STATE_WAIT_START;
+        frame_payload_.push_back(b);
+        bytes_read_++;
+        if (bytes_read_ >= frame_len_) {
+          parser_state_ = STATE_WAIT_CHECKSUM;
         }
+        break;
+
+      case STATE_WAIT_CHECKSUM:
+        // этот байт Ч checksum
+        handle_frame_with_checksum_(b);
+        parser_state_ = STATE_WAIT_START;
+        break;
+
+      case STATE_GOT_LEN:
+      default:
+        parser_state_ = STATE_WAIT_START;
         break;
     }
   }
 
-  // контрольна€ сумма, как в midea-protocol
+  // контрольна€ сумма, как в логах (двухкомплемент)
   bool check_checksum_(uint8_t recv) {
     uint16_t sum = frame_start_ + frame_pid_ + frame_len_;
     for (uint8_t v : frame_payload_)
       sum += v;
-    uint8_t calc = (uint8_t)(-(sum & 0xFF));
+    uint8_t calc = (uint8_t) (-(sum & 0xFF));
     return calc == recv;
   }
 
   void handle_frame_with_checksum_(uint8_t cks) {
     if (!check_checksum_(cks)) {
-      ESP_LOGW("carrier_bridge",
-               "Bad checksum: start=%02X pid=%02X len=%u",
-               frame_start_, frame_pid_, frame_len_);
+      // иногда можно раскомментировать дл€ дебага (но будет шумно)
+      // ESP_LOGW("carrier_bridge",
+      //          "Bad checksum: start=%02X pid=%02X len=%u",
+      //          frame_start_, frame_pid_, frame_len_);
       return;
     }
 
-    // статистика
+    // статистика по валидным кадрам
     this->uart_frame_count_++;
     if (frame_start_ == 0x55 && frame_pid_ == 0x90) this->frame_55_90_count_++;
     if (frame_start_ == 0x55 && frame_pid_ == 0x91) this->frame_55_91_count_++;
@@ -200,6 +216,9 @@ class CarrierUartBridge : public climate::Climate,
       this->handle_state_frame_();
     else if (frame_start_ == 0x55 && frame_pid_ == 0x91)
       this->handle_mode_frame_();
+    else {
+      // AA 90 / AA 91 сейчас игнорируем
+    }
   }
 
   // ================================================================
@@ -229,7 +248,7 @@ class CarrierUartBridge : public climate::Climate,
     if (!is_all_zero_(mode_block, 8))
       decode_mode_block_(mode_block);
     else
-      this->mode = climate::CLIMATE_MODE_OFF;
+      this->mode = climate::CLIMATE_MODE_OFF;  // 00..00 Ч OFF/LED toggle
 
     this->publish_state();
   }
@@ -253,7 +272,6 @@ class CarrierUartBridge : public climate::Climate,
       this->target_temperature = temp;
 
     this->mode = decode_mode_(b0, b1, b4);
-
     this->fan_mode = climate::CLIMATE_FAN_AUTO;
   }
 
@@ -276,7 +294,7 @@ class CarrierUartBridge : public climate::Climate,
     };
     for (auto &e : tbl)
       if (e.a == b0 && e.b == b1)
-        return e.t;
+        return (float) e.t;
     return NAN;
   }
 
@@ -293,8 +311,10 @@ class CarrierUartBridge : public climate::Climate,
     }
 
     if (b0 == 0x06 && b1 == 0x6F) {
-      if (b4 == 0x48) return climate::CLIMATE_MODE_DRY;
-      if (b4 == 0x00) return climate::CLIMATE_MODE_FAN_ONLY;
+      if (b4 == 0x48)
+        return climate::CLIMATE_MODE_DRY;
+      if (b4 == 0x00)
+        return climate::CLIMATE_MODE_FAN_ONLY;
     }
 
     if (b0 == 0x3F) {
