@@ -28,7 +28,7 @@ class CarrierUartBridge : public climate::Climate,
   }
 
   // ================================================================
-  // Loop — читаем UART, обновляем статистику
+  // Loop вЂ” С‡РёС‚Р°РµРј UART, РѕР±РЅРѕРІР»СЏРµРј СЃС‚Р°С‚РёСЃС‚РёРєСѓ
   // ================================================================
   void loop() override {
     while (this->available()) {
@@ -37,7 +37,7 @@ class CarrierUartBridge : public climate::Climate,
       this->process_uart_byte_(b);
     }
 
-    // периодический лог каждые 10 секунд
+    // РїРµСЂРёРѕРґРёС‡РµСЃРєРёР№ Р»РѕРі РєР°Р¶РґС‹Рµ 10 СЃРµРєСѓРЅРґ
     uint32_t now = millis();
     if (now - this->last_log_ms_ > 10000) {
       this->last_log_ms_ = now;
@@ -51,7 +51,7 @@ class CarrierUartBridge : public climate::Climate,
   }
 
   // ================================================================
-  // Climate control — команды из HA
+  // Climate control вЂ” РєРѕРјР°РЅРґС‹ РёР· HA
   // ================================================================
   void control(const climate::ClimateCall &call) override {
     if (call.get_mode().has_value())
@@ -69,7 +69,7 @@ class CarrierUartBridge : public climate::Climate,
              this->target_temperature,
              (int) this->fan_mode.value_or(climate::CLIMATE_FAN_AUTO));
 
-    // TODO: отправка IR
+    // TODO: РѕС‚РїСЂР°РІРєР° IR
     this->send_ir_from_state_();
 
     this->publish_state();
@@ -141,12 +141,12 @@ class CarrierUartBridge : public climate::Climate,
         break;
 
       case STATE_GOT_START:
-        // ждём PID
+        // Р¶РґС‘Рј PID
         if (b == 0x90 || b == 0x91) {
           frame_pid_ = b;
           parser_state_ = STATE_GOT_PID;
         } else {
-          // не PID — сброс, но этот байт может быть новым стартом
+          // РЅРµ PID вЂ” СЃР±СЂРѕСЃ, РЅРѕ СЌС‚РѕС‚ Р±Р°Р№С‚ РјРѕР¶РµС‚ Р±С‹С‚СЊ РЅРѕРІС‹Рј СЃС‚Р°СЂС‚РѕРј
           parser_state_ = STATE_WAIT_START;
           if (b == 0x55 || b == 0xAA) {
             frame_start_ = b;
@@ -156,7 +156,7 @@ class CarrierUartBridge : public climate::Climate,
         break;
 
       case STATE_GOT_PID:
-        // длина
+        // РґР»РёРЅР°
         frame_len_ = b;
         frame_payload_.clear();
         frame_payload_.reserve(frame_len_);
@@ -177,7 +177,7 @@ class CarrierUartBridge : public climate::Climate,
         break;
 
       case STATE_WAIT_CHECKSUM:
-        // этот байт — checksum
+        // СЌС‚РѕС‚ Р±Р°Р№С‚ вЂ” checksum
         handle_frame_with_checksum_(b);
         parser_state_ = STATE_WAIT_START;
         break;
@@ -189,7 +189,7 @@ class CarrierUartBridge : public climate::Climate,
     }
   }
 
-  // контрольная сумма, как в логах (двухкомплемент)
+  // РєРѕРЅС‚СЂРѕР»СЊРЅР°СЏ СЃСѓРјРјР°, РєР°Рє РІ Р»РѕРіР°С… (РґРІСѓС…РєРѕРјРїР»РµРјРµРЅС‚)
   bool check_checksum_(uint8_t recv) {
     uint16_t sum = frame_start_ + frame_pid_ + frame_len_;
     for (uint8_t v : frame_payload_)
@@ -200,14 +200,14 @@ class CarrierUartBridge : public climate::Climate,
 
   void handle_frame_with_checksum_(uint8_t cks) {
     if (!check_checksum_(cks)) {
-      // иногда можно раскомментировать для дебага (но будет шумно)
+      // РёРЅРѕРіРґР° РјРѕР¶РЅРѕ СЂР°СЃРєРѕРјРјРµРЅС‚РёСЂРѕРІР°С‚СЊ РґР»СЏ РґРµР±Р°РіР° (РЅРѕ Р±СѓРґРµС‚ С€СѓРјРЅРѕ)
       // ESP_LOGW("carrier_bridge",
       //          "Bad checksum: start=%02X pid=%02X len=%u",
       //          frame_start_, frame_pid_, frame_len_);
       return;
     }
 
-    // статистика по валидным кадрам
+    // СЃС‚Р°С‚РёСЃС‚РёРєР° РїРѕ РІР°Р»РёРґРЅС‹Рј РєР°РґСЂР°Рј
     this->uart_frame_count_++;
     if (frame_start_ == 0x55 && frame_pid_ == 0x90) this->frame_55_90_count_++;
     if (frame_start_ == 0x55 && frame_pid_ == 0x91) this->frame_55_91_count_++;
@@ -217,12 +217,12 @@ class CarrierUartBridge : public climate::Climate,
     else if (frame_start_ == 0x55 && frame_pid_ == 0x91)
       this->handle_mode_frame_();
     else {
-      // AA 90 / AA 91 сейчас игнорируем
+      // AA 90 / AA 91 СЃРµР№С‡Р°СЃ РёРіРЅРѕСЂРёСЂСѓРµРј
     }
   }
 
   // ================================================================
-  // Parsing 55 90 — состояние кондиционера
+  // Parsing 55 90 вЂ” СЃРѕСЃС‚РѕСЏРЅРёРµ РєРѕРЅРґРёС†РёРѕРЅРµСЂР°
   // ================================================================
   void handle_state_frame_() {
     if (frame_payload_.size() < 0x14) return;
@@ -238,7 +238,7 @@ class CarrierUartBridge : public climate::Climate,
   }
 
   // ================================================================
-  // Parsing 55 91 — команда с пульта
+  // Parsing 55 91 вЂ” РєРѕРјР°РЅРґР° СЃ РїСѓР»СЊС‚Р°
   // ================================================================
   void handle_mode_frame_() {
     if (frame_payload_.size() != 8) return;
@@ -248,7 +248,7 @@ class CarrierUartBridge : public climate::Climate,
     if (!is_all_zero_(mode_block, 8))
       decode_mode_block_(mode_block);
     else
-      this->mode = climate::CLIMATE_MODE_OFF;  // 00..00 — OFF/LED toggle
+      this->mode = climate::CLIMATE_MODE_OFF;  // 00..00 вЂ” OFF/LED toggle
 
     this->publish_state();
   }
@@ -318,7 +318,7 @@ class CarrierUartBridge : public climate::Climate,
     }
 
     if (b0 == 0x3F) {
-      // TURBO toggle — режим не меняем
+      // TURBO toggle вЂ” СЂРµР¶РёРј РЅРµ РјРµРЅСЏРµРј
       return this->mode;
     }
 
