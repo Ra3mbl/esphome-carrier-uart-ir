@@ -5,7 +5,7 @@ import esphome.config_validation as cv
 from esphome.components import uart, climate
 from esphome.const import CONF_ID
 
-CODEOWNERS = ["@your_nick"]  # можешь поменять
+CODEOWNERS = ["@your_nick"]  # 
 
 carrier_uart_ir_ns = cg.esphome_ns.namespace("carrier_uart_ir")
 CarrierUartBridge = carrier_uart_ir_ns.class_(
